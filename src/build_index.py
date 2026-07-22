@@ -11,11 +11,13 @@ Usage:
     python src/build_index.py
 """
 
+import argparse
 import ast
 import subprocess
 import sys
 from pathlib import Path
 
+import chromadb
 from sentence_transformers import SentenceTransformer
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -162,29 +164,94 @@ def embed_chunks(chunks, model=None):
     return embeddings
 
 
-def main():
+def get_chroma_collection():
+    """Open (creating if needed) the on-disk Chroma collection. The client
+    persists to CHROMA_PERSIST_DIR, so data survives across runs."""
+    client = chromadb.PersistentClient(path=config.CHROMA_PERSIST_DIR)
+    return client.get_or_create_collection(
+        name=config.CHROMA_COLLECTION_NAME,
+        metadata={"hnsw:space": "cosine"},
+    )
+
+
+def persist_chunks(collection, chunks, embeddings, batch_size=500):
+    """Write chunks + their embeddings into the Chroma collection in
+    batches (Chroma caps how many items can be added in a single call)."""
+    for i in range(0, len(chunks), batch_size):
+        batch_chunks = chunks[i : i + batch_size]
+        batch_embeddings = embeddings[i : i + batch_size]
+        collection.add(
+            ids=[c["id"] for c in batch_chunks],
+            embeddings=[e.tolist() for e in batch_embeddings],
+            documents=[c["source"] for c in batch_chunks],
+            metadatas=[
+                {
+                    "file": c["file"],
+                    "qualified_name": c["qualified_name"],
+                    "type": c["type"],
+                    "start_line": c["start_line"],
+                    "end_line": c["end_line"],
+                }
+                for c in batch_chunks
+            ],
+        )
+
+
+def build_index(rebuild=False):
+    """Build (or reuse) the on-disk Chroma index. Returns the collection.
+
+    If the collection already has data and `rebuild` is False, the whole
+    clone/chunk/embed pipeline is skipped -- that's the point of persisting
+    to disk: this doesn't need to happen on every run.
+    """
+    collection = get_chroma_collection()
+
+    if collection.count() > 0 and not rebuild:
+        print(
+            f"Index already persisted at {config.CHROMA_PERSIST_DIR} "
+            f"with {collection.count()} chunks. Skipping rebuild "
+            "(pass --rebuild to force)."
+        )
+        return collection
+
+    if collection.count() > 0 and rebuild:
+        print("Rebuilding: clearing existing collection...")
+        client = chromadb.PersistentClient(path=config.CHROMA_PERSIST_DIR)
+        client.delete_collection(config.CHROMA_COLLECTION_NAME)
+        collection = client.create_collection(
+            name=config.CHROMA_COLLECTION_NAME,
+            metadata={"hnsw:space": "cosine"},
+        )
+
     repo_dir = clone_repo()
     print(f"Repo ready at: {repo_dir}")
 
     chunks = chunk_repository(repo_dir)
-    print(f"\nChunked into {len(chunks)} function/method/class chunks.")
+    print(f"Chunked into {len(chunks)} function/method/class chunks.")
 
-    by_type = {}
-    for c in chunks:
-        by_type[c["type"]] = by_type.get(c["type"], 0) + 1
-    print("By type:", by_type)
-
-    print("\nSample chunks:")
-    for c in chunks[:3]:
-        print("-" * 60)
-        print(f"id: {c['id']}")
-        print(f"type: {c['type']}  lines: {c['start_line']}-{c['end_line']}")
-        print(c["source"][:300])
-
-    print(f"\nEmbedding {len(chunks)} chunks with '{config.EMBEDDING_MODEL_NAME}'...")
+    print(f"Embedding {len(chunks)} chunks with '{config.EMBEDDING_MODEL_NAME}'...")
     model = load_embedding_model()
     embeddings = embed_chunks(chunks, model=model)
-    print(f"Embeddings shape: {embeddings.shape}, dtype: {embeddings.dtype}")
+
+    print(f"Persisting {len(chunks)} chunks to Chroma at {config.CHROMA_PERSIST_DIR}...")
+    persist_chunks(collection, chunks, embeddings)
+    print(f"Done. Collection now has {collection.count()} chunks.")
+
+    return collection
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--rebuild",
+        action="store_true",
+        help="Force a full re-clone/re-chunk/re-embed even if an index is already persisted.",
+    )
+    args = parser.parse_args()
+
+    collection = build_index(rebuild=args.rebuild)
+    print(f"\nIndex ready: '{collection.name}' at {config.CHROMA_PERSIST_DIR} "
+          f"({collection.count()} chunks).")
 
 
 if __name__ == "__main__":
