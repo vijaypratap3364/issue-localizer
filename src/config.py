@@ -35,8 +35,22 @@ MIN_CHANGED_FILES = 1
 MAX_CHANGED_FILES = 20
 
 # --- Output ---
-OUTPUT_PATH = os.path.join(
-    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-    "data",
-    "eval_dataset.jsonl",
-)
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+OUTPUT_PATH = os.path.join(PROJECT_ROOT, "data", "eval_dataset.jsonl")
+
+# --- Code index (Phase 2: build_index.py) ---
+# Where the target repo is shallow-cloned so it can be chunked/embedded.
+# This is a build cache, not source we own -- it's gitignored, not committed.
+REPO_GIT_URL = f"https://github.com/{REPO_OWNER}/{REPO_NAME}.git"
+REPO_CACHE_DIR = os.path.join(PROJECT_ROOT, ".cache", "repo")
+
+# Only files under these subdirectories of the repo are indexed (skips
+# tests/docs/vendored code that would otherwise dominate the index).
+INDEX_INCLUDE_DIRS = ["src"]
+
+# Local, free sentence-transformers model used to embed code chunks.
+EMBEDDING_MODEL_NAME = "all-MiniLM-L6-v2"
+
+# On-disk Chroma index (persisted so it isn't rebuilt on every run).
+CHROMA_PERSIST_DIR = os.path.join(PROJECT_ROOT, ".cache", "chroma")
+CHROMA_COLLECTION_NAME = f"{REPO_NAME.lower()}_code_chunks"

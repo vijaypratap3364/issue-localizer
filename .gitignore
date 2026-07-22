@@ -12,3 +12,6 @@ venv/
 .vscode/
 .idea/
 .DS_Store
+
+# Build caches (Phase 2: build_index.py) -- regenerable, not source we own
+.cache/
