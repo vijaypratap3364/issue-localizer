@@ -240,6 +240,39 @@ def build_index(rebuild=False):
     return collection
 
 
+def query_index(collection, query_text, model=None, top_k=5):
+    """Embed `query_text` with the same model used to build the index and
+    return the top_k nearest chunks."""
+    model = model or load_embedding_model()
+    query_embedding = model.encode([query_text], convert_to_numpy=True)[0]
+    return collection.query(query_embeddings=[query_embedding.tolist()], n_results=top_k)
+
+
+def print_query_results(query_text, results):
+    print(f"\nQuery: {query_text!r}")
+    ids = results["ids"][0]
+    metadatas = results["metadatas"][0]
+    distances = results["distances"][0]
+    documents = results["documents"][0]
+    for rank, (id_, meta, dist, doc) in enumerate(
+        zip(ids, metadatas, distances, documents), start=1
+    ):
+        print(
+            f"  {rank}. {meta['file']} :: {meta['qualified_name']} "
+            f"({meta['type']}, lines {meta['start_line']}-{meta['end_line']}) "
+            f"[distance={dist:.3f}]"
+        )
+        snippet = doc.strip().splitlines()[0][:100]
+        print(f"     {snippet}")
+
+
+DEMO_QUERIES = [
+    "resize an image to a new width and height",
+    "open and identify an image file's format",
+    "convert an image between color modes like RGB and CMYK",
+]
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -247,11 +280,26 @@ def main():
         action="store_true",
         help="Force a full re-clone/re-chunk/re-embed even if an index is already persisted.",
     )
+    parser.add_argument(
+        "--query",
+        type=str,
+        default=None,
+        help="Run this single query against the index instead of the built-in demo queries.",
+    )
+    parser.add_argument("--top-k", type=int, default=5)
     args = parser.parse_args()
 
     collection = build_index(rebuild=args.rebuild)
-    print(f"\nIndex ready: '{collection.name}' at {config.CHROMA_PERSIST_DIR} "
-          f"({collection.count()} chunks).")
+    print(
+        f"\nIndex ready: '{collection.name}' at {config.CHROMA_PERSIST_DIR} "
+        f"({collection.count()} chunks)."
+    )
+
+    model = load_embedding_model()
+    queries = [args.query] if args.query else DEMO_QUERIES
+    for q in queries:
+        results = query_index(collection, q, model=model, top_k=args.top_k)
+        print_query_results(q, results)
 
 
 if __name__ == "__main__":
