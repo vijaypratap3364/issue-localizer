@@ -16,6 +16,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from sentence_transformers import SentenceTransformer
+
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import config  # noqa: E402
 
@@ -135,6 +137,31 @@ def chunk_repository(repo_dir):
     return chunks
 
 
+def _embedding_text(chunk):
+    """Text actually fed to the embedding model for a chunk: a small header
+    (file + qualified name) so the model has symbol/location context, plus
+    the source itself."""
+    return f"# {chunk['file']} :: {chunk['qualified_name']} ({chunk['type']})\n{chunk['source']}"
+
+
+def load_embedding_model():
+    return SentenceTransformer(config.EMBEDDING_MODEL_NAME)
+
+
+def embed_chunks(chunks, model=None):
+    """Embed every chunk locally and return a list of embedding vectors
+    (one per chunk, same order as `chunks`)."""
+    model = model or load_embedding_model()
+    texts = [_embedding_text(c) for c in chunks]
+    embeddings = model.encode(
+        texts,
+        batch_size=64,
+        show_progress_bar=True,
+        convert_to_numpy=True,
+    )
+    return embeddings
+
+
 def main():
     repo_dir = clone_repo()
     print(f"Repo ready at: {repo_dir}")
@@ -153,6 +180,11 @@ def main():
         print(f"id: {c['id']}")
         print(f"type: {c['type']}  lines: {c['start_line']}-{c['end_line']}")
         print(c["source"][:300])
+
+    print(f"\nEmbedding {len(chunks)} chunks with '{config.EMBEDDING_MODEL_NAME}'...")
+    model = load_embedding_model()
+    embeddings = embed_chunks(chunks, model=model)
+    print(f"Embeddings shape: {embeddings.shape}, dtype: {embeddings.dtype}")
 
 
 if __name__ == "__main__":
