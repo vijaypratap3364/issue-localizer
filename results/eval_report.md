@@ -1,6 +1,6 @@
 # Issue Localizer -- Evaluation Report
 
-**Generated:** 2026-07-23 04:38 UTC  
+**Generated:** 2026-07-23 04:46 UTC  
 **Model:** `gemini-3.5-flash-lite`  
 **Repo under test:** [python-pillow/Pillow](https://github.com/python-pillow/Pillow)  
 **Dataset:** `data/eval_dataset.jsonl` -- 80 examples (75 scored, 5 failed to run due to API errors)
