@@ -15,6 +15,8 @@ Usage (standalone, once tools/loop are wired up):
     python src/agent.py
 """
 
+import argparse
+import json
 import subprocess
 import sys
 import time
@@ -147,38 +149,11 @@ def read_file(path, start_line=None, end_line=None, max_lines=None):
     }
 
 
-def _print_read_file_result(path, result, **kwargs):
-    print(f"\nread_file({path!r}, {kwargs}) ->")
-    if "error" in result:
-        print(f"  ERROR: {result['error']}")
-        return
-    print(
-        f"  lines {result['start_line']}-{result['end_line']} of "
-        f"{result['total_lines']} (truncated={result['truncated']})"
-    )
-    print("  " + result["content"].splitlines()[0][:100])
-
-
-def _print_grep_results(pattern, results):
-    print(f"\ngrep_repo({pattern!r}) -> {len(results)} results")
-    for r in results:
-        print(f"  {r['file']}:{r['line']}: {r['text'].strip()[:100]}")
-
-
-def _print_semantic_search_results(query, results):
-    print(f"\nsemantic_search({query!r}) -> {len(results)} results")
-    for rank, r in enumerate(results, start=1):
-        print(
-            f"  {rank}. {r['file']} :: {r['qualified_name']} "
-            f"({r['type']}, lines {r['start_line']}-{r['end_line']}) "
-            f"[distance={r['distance']:.3f}]"
-        )
-
-
 def call_gemini(contents, tools=None, tool_config=None, system_instruction=None, max_retries=5):
     """POST to the Gemini generateContent endpoint, retrying with backoff on
-    429 (rate limit) and 5xx responses. Raises clearly rather than hanging
-    once retries are exhausted."""
+    429 (rate limit), 5xx responses, and network-level errors (timeouts,
+    connection resets). Raises clearly rather than hanging once retries are
+    exhausted."""
     if not config.GEMINI_API_KEY:
         raise RuntimeError(
             "GEMINI_API_KEY not set. Add it to .env -- see .env.example."
@@ -200,7 +175,19 @@ def call_gemini(contents, tools=None, tool_config=None, system_instruction=None,
     backoff = 2
     last_error = None
     for attempt in range(1, max_retries + 1):
-        resp = requests.post(url, headers=headers, json=body, timeout=60)
+        try:
+            resp = requests.post(url, headers=headers, json=body, timeout=120)
+        except requests.exceptions.RequestException as e:
+            # Network-level failures (timeouts, connection resets, ...) are
+            # just as retryable as a 5xx -- don't let them crash the loop.
+            print(
+                f"  Gemini network error ({e.__class__.__name__}). Retrying in "
+                f"{backoff}s... (attempt {attempt}/{max_retries})"
+            )
+            time.sleep(backoff)
+            backoff = min(backoff * 2, 60)
+            last_error = f"network error: {e}"
+            continue
 
         if resp.status_code == 200:
             return resp.json()
@@ -488,51 +475,70 @@ def localize_issue(issue_title, issue_body, collection=None, model=None, max_too
     }
 
 
-if __name__ == "__main__":
+def load_eval_examples(indices=None, path=None):
+    """Load examples from data/eval_dataset.jsonl. `indices` selects specific
+    (0-based) lines; defaults to a small, diverse hand-picked sample."""
+    path = path or config.OUTPUT_PATH
+    if indices is None:
+        indices = (0, 2, 18)  # mixed Python+C, C-only, pure-Python -- see below
+
+    with open(path, encoding="utf-8") as f:
+        all_examples = [json.loads(line) for line in f]
+
+    return [all_examples[i] for i in indices]
+
+
+def run_demo(indices=None, max_tool_calls=None):
+    """Run the agent standalone against a handful of real eval examples and
+    print predictions + reasoning next to the real ground-truth
+    changed_files, for manual sanity-checking. Not scored -- that's the
+    eval harness's job, which doesn't exist yet."""
     collection = build_index.get_chroma_collection()
     if collection.count() == 0:
         print("Index is empty -- run `python src/build_index.py` first.")
         sys.exit(1)
-
     model = build_index.load_embedding_model()
-    for query in [
-        "cur file saved as png has wrong transparency/alpha",
-        "reference leak PyDict_GetItemRef not decref'd",
-    ]:
-        results = semantic_search(query, collection=collection, model=model)
-        _print_semantic_search_results(query, results)
 
-    for pattern in ["PyDict_GetItemRef", "path_subscript", "DoesNotExistXYZ123"]:
-        results = grep_repo(pattern)
-        _print_grep_results(pattern, results)
+    examples = load_eval_examples(indices)
+    for i, example in enumerate(examples, start=1):
+        print("=" * 70)
+        print(f"[{i}/{len(examples)}] {example['issue_title']}")
+        print("-" * 70)
 
-    r = read_file("src/path.c", start_line=590, end_line=610)
-    _print_read_file_result("src/path.c", r, start_line=590, end_line=610)
+        result = localize_issue(
+            example["issue_title"],
+            example["issue_body"],
+            collection=collection,
+            model=model,
+            max_tool_calls=max_tool_calls,
+        )
 
-    r = read_file("../../../../etc/passwd")
-    _print_read_file_result("../../../../etc/passwd", r)
+        print(f"\nturns used: {result['turns']}")
+        if result.get("error"):
+            print(f"ERROR: {result['error']}")
 
-    r = read_file("src/does_not_exist.py")
-    _print_read_file_result("src/does_not_exist.py", r)
+        print("\npredicted:")
+        for rank, p in enumerate(result["predictions"], start=1):
+            print(f"  {rank}. {p['file']}")
+            print(f"     {p['reasoning']}")
 
-    print("\ncalling Gemini ({})...".format(config.GEMINI_MODEL_NAME))
-    text = generate_text("Reply with exactly the two words: hello world")
-    print(f"  response: {text!r}")
+        print("\nactual changed_files (ground truth, not shown to the agent):")
+        for f in example["changed_files"]:
+            hit = "*" if f in {p["file"] for p in result["predictions"]} else " "
+            print(f"  [{hit}] {f}")
+        print()
 
-    print("\nrunning full agent loop on a sample issue...")
-    result = localize_issue(
-        issue_title="path_subscript hardcodes slice length to 4 instead of self->count",
-        issue_body=(
-            "In src/path.c, the path_subscript function hardcodes len = 4 when "
-            "computing slice indices, instead of using self->count (the actual "
-            "path length). For paths with more than 4 points, negative indices "
-            "and slices beyond index 4 resolve incorrectly."
-        ),
-        collection=collection,
-        model=model,
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--indices",
+        type=int,
+        nargs="+",
+        default=None,
+        help="0-based line indices into data/eval_dataset.jsonl to run (default: a curated diverse sample of 3).",
     )
-    print(f"\nturns used: {result['turns']}")
-    if result.get("error"):
-        print(f"ERROR: {result['error']}")
-    for rank, p in enumerate(result["predictions"], start=1):
-        print(f"  {rank}. {p['file']} -- {p['reasoning']}")
+    parser.add_argument("--max-tool-calls", type=int, default=None)
+    args = parser.parse_args()
+
+    run_demo(indices=args.indices, max_tool_calls=args.max_tool_calls)

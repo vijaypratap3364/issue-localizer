@@ -59,11 +59,25 @@ CHROMA_COLLECTION_NAME = f"{REPO_NAME.lower()}_code_chunks"
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 GEMINI_API_BASE = "https://generativelanguage.googleapis.com/v1beta"
 # Flash, not Pro: much higher free-tier rate limits, and this task doesn't
-# need frontier-level reasoning. Confirmed current via the live ListModels
-# endpoint (GET {GEMINI_API_BASE}/models) rather than static docs -- as of
-# 2026-07, "gemini-3.6-flash" (version "3.6-flash-07-2026") is the newest
-# non-preview stable Flash model available to this API key.
-GEMINI_MODEL_NAME = "gemini-3.6-flash"
+# need frontier-level reasoning.
+#
+# Model choice was determined empirically against the live API for this
+# specific key/project (web docs were unreachable, and ListModels alone
+# doesn't expose per-model quotas or deprecation status):
+#   - gemini-3.6-flash (newest) and gemini-3.5-flash: both free-tier capped
+#     at just 20 requests/DAY per project
+#     (quotaId GenerateRequestsPerDayPerProjectPerModel-FreeTier) -- nowhere
+#     near enough for an agent loop making several calls per issue.
+#   - gemini-2.5-flash / gemini-2.5-flash-lite: 404, "no longer available
+#     to new users" -- this project can't use them at all.
+#   - gemini-flash-latest / gemini-2.0-flash / gemini-2.0-flash-lite:
+#     already 429/quota-exhausted for this project.
+#   - gemini-3.5-flash-lite: available (200) and, as the Lite tier, gets a
+#     meaningfully higher free daily quota than the full Flash models above.
+# So we pin to "gemini-3.5-flash-lite" -- adjust here if your project's
+# available models/quotas differ (check via GET {GEMINI_API_BASE}/models,
+# and note quota details only surface in an actual 429 response body).
+GEMINI_MODEL_NAME = "gemini-3.5-flash-lite"
 
 # How many chunks semantic_search returns by default.
 AGENT_SEMANTIC_SEARCH_TOP_K = 8
