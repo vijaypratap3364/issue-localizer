@@ -15,6 +15,7 @@ Usage (standalone, once tools/loop are wired up):
     python src/agent.py
 """
 
+import subprocess
 import sys
 from pathlib import Path
 
@@ -51,6 +52,57 @@ def semantic_search(query, top_k=None, collection=None, model=None):
     return results
 
 
+def grep_repo(pattern, max_results=None, regex=False):
+    """Exact (or regex) search for `pattern` across the *entire* cloned
+    repo -- unlike semantic_search this also covers non-Python files (e.g.
+    Pillow's C sources), and is the reliable way to find exact symbol
+    names the issue text mentions.
+
+    Returns a list of dicts: file, line, text. Uses `git grep`, which is
+    fast and (since the repo cache is a git clone) always available.
+    """
+    max_results = max_results or config.AGENT_GREP_MAX_RESULTS
+    repo_dir = Path(config.REPO_CACHE_DIR)
+    if not (repo_dir / ".git").exists():
+        raise RuntimeError(
+            f"No repo cloned at {repo_dir} -- run `python src/build_index.py` first."
+        )
+    if not pattern or not pattern.strip():
+        return []
+
+    cmd = ["git", "grep", "-n", "-I", "--no-color"]
+    cmd.append("-E" if regex else "-F")
+    cmd.append(pattern)
+
+    proc = subprocess.run(
+        cmd, cwd=repo_dir, capture_output=True, text=True, errors="ignore"
+    )
+
+    if proc.returncode == 1:
+        return []  # git grep: no matches (not an error)
+    if proc.returncode not in (0, 1):
+        raise RuntimeError(f"git grep failed (exit {proc.returncode}): {proc.stderr.strip()}")
+
+    results = []
+    for line in proc.stdout.splitlines():
+        # format: path:line_number:matched_text
+        file_path, _, rest = line.partition(":")
+        line_no, _, text = rest.partition(":")
+        if not line_no.isdigit():
+            continue
+        results.append({"file": file_path, "line": int(line_no), "text": text})
+        if len(results) >= max_results:
+            break
+
+    return results
+
+
+def _print_grep_results(pattern, results):
+    print(f"\ngrep_repo({pattern!r}) -> {len(results)} results")
+    for r in results:
+        print(f"  {r['file']}:{r['line']}: {r['text'].strip()[:100]}")
+
+
 def _print_semantic_search_results(query, results):
     print(f"\nsemantic_search({query!r}) -> {len(results)} results")
     for rank, r in enumerate(results, start=1):
@@ -74,3 +126,7 @@ if __name__ == "__main__":
     ]:
         results = semantic_search(query, collection=collection, model=model)
         _print_semantic_search_results(query, results)
+
+    for pattern in ["PyDict_GetItemRef", "path_subscript", "DoesNotExistXYZ123"]:
+        results = grep_repo(pattern)
+        _print_grep_results(pattern, results)
