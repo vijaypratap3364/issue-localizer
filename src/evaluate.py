@@ -21,6 +21,11 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
+import matplotlib
+
+matplotlib.use("Agg")  # headless: this script never needs an interactive window
+import matplotlib.pyplot as plt  # noqa: E402
+
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import agent  # noqa: E402
 import build_index  # noqa: E402
@@ -28,6 +33,7 @@ import config  # noqa: E402
 
 RESULTS_PATH = Path(config.PROJECT_ROOT) / "results" / "eval_results.jsonl"
 REPORT_PATH = Path(config.PROJECT_ROOT) / "results" / "eval_report.md"
+CHART_PATH = Path(config.PROJECT_ROOT) / "results" / "eval_chart.png"
 
 
 def load_all_examples(path=None):
@@ -252,6 +258,45 @@ CATEGORY_DEFINITIONS = {
 }
 
 
+def generate_chart(summary, path=None):
+    """Grouped bar chart: precision/recall/F1 for each failure category."""
+    path = path or CHART_PATH
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    cats = [c for c in CATEGORIES if summary["category_breakdown"][c]["n"] > 0]
+    if not cats:
+        return None
+
+    metrics = ["precision", "recall", "f1"]
+    colors = {"precision": "#4C72B0", "recall": "#DD8452", "f1": "#55A868"}
+    width = 0.25
+    x = list(range(len(cats)))
+
+    fig, ax = plt.subplots(figsize=(8, 5))
+    for i, metric in enumerate(metrics):
+        values = [summary["category_breakdown"][c][metric] for c in cats]
+        offsets = [xi + (i - 1) * width for xi in x]
+        bars = ax.bar(offsets, values, width, label=metric.capitalize(), color=colors[metric])
+        ax.bar_label(bars, fmt="%.2f", padding=2, fontsize=8)
+
+    ax.set_xticks(x)
+    ax.set_xticklabels(
+        [f"{CATEGORY_LABELS[c]}\n(n={summary['category_breakdown'][c]['n']})" for c in cats]
+    )
+    ax.set_ylim(0, 1.15)
+    ax.set_ylabel("Score")
+    ax.set_title(f"Precision / Recall / F1 by failure category ({config.GEMINI_MODEL_NAME})")
+    ax.legend(loc="upper right", ncol=3)
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    fig.tight_layout()
+    fig.savefig(path, dpi=150)
+    plt.close(fig)
+
+    print(f"Wrote {path}")
+    return path
+
+
 def write_report(results, summary, path=None):
     path = path or REPORT_PATH
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -370,6 +415,7 @@ def main():
     parser.add_argument("--output", type=str, default=None, help="Results JSONL path (default: results/eval_results.jsonl).")
     parser.add_argument("--max-tool-calls", type=int, default=None)
     parser.add_argument("--report", type=str, default=None, help="Report .md path (default: results/eval_report.md).")
+    parser.add_argument("--chart", type=str, default=None, help="Chart .png path (default: results/eval_chart.png).")
     parser.add_argument(
         "--report-only",
         action="store_true",
@@ -388,6 +434,8 @@ def main():
             results = [json.loads(line) for line in f]
         summary = summarize(results)
         write_report(results, summary, path=Path(args.report) if args.report else None)
+        if summary.get("n_scored", 0) > 0:
+            generate_chart(summary, path=Path(args.chart) if args.chart else None)
         return
 
     all_examples = load_all_examples()
@@ -469,6 +517,8 @@ def main():
                 print(f"  - {p}")
 
     write_report(results, summary, path=Path(args.report) if args.report else None)
+    if summary.get("n_scored", 0) > 0:
+        generate_chart(summary, path=Path(args.chart) if args.chart else None)
 
 
 if __name__ == "__main__":

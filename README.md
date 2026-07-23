@@ -4,6 +4,28 @@ Given a GitHub issue description, predict which files need to change to fix
 it — evaluated against real historical data (merged PRs that closed real
 issues).
 
+## Results
+
+<!-- TODO: narrative -->
+
+Evaluated against 80 real [python-pillow/Pillow](https://github.com/python-pillow/Pillow)
+issues (75 scored; 5 excluded as API infra failures, not prediction failures)
+using `gemini-3.5-flash-lite` as the agent's reasoning model:
+
+| Metric | Value |
+|---|---|
+| Precision (macro-avg) | 0.758 |
+| Recall (macro-avg) | 0.447 |
+| F1 (macro-avg) | 0.512 |
+| Avg. tool-call turns per example | 4.9 (cap: 6) |
+| Full-hit rate (every correct file found) | 22.7% (17/75) |
+
+![Precision, recall, and F1 by failure category](results/eval_chart.png)
+
+Full category breakdown, failure analysis, and per-example results:
+[results/eval_report.md](results/eval_report.md). Regenerate with
+`python src/evaluate.py` (see [src/evaluate.py](src/evaluate.py)).
+
 Eventual scope: a local vector index over a repo's code, an agent that
 searches the index and can grep/read files, and an eval harness comparing
 predictions against real merged-PR file changes.
