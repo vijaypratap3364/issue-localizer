@@ -59,10 +59,11 @@ CHROMA_COLLECTION_NAME = f"{REPO_NAME.lower()}_code_chunks"
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 GEMINI_API_BASE = "https://generativelanguage.googleapis.com/v1beta"
 # Flash, not Pro: much higher free-tier rate limits, and this task doesn't
-# need frontier-level reasoning. Verified against the live ListModels
-# endpoint for the configured GEMINI_API_KEY -- see agent.py's
-# `list_gemini_models` helper if this ever needs re-checking.
-GEMINI_MODEL_NAME = "gemini-2.5-flash"
+# need frontier-level reasoning. Confirmed current via the live ListModels
+# endpoint (GET {GEMINI_API_BASE}/models) rather than static docs -- as of
+# 2026-07, "gemini-3.6-flash" (version "3.6-flash-07-2026") is the newest
+# non-preview stable Flash model available to this API key.
+GEMINI_MODEL_NAME = "gemini-3.6-flash"
 
 # How many chunks semantic_search returns by default.
 AGENT_SEMANTIC_SEARCH_TOP_K = 8

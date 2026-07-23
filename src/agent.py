@@ -17,7 +17,13 @@ Usage (standalone, once tools/loop are wired up):
 
 import subprocess
 import sys
+import time
 from pathlib import Path
+
+import requests
+from dotenv import load_dotenv
+
+load_dotenv()  # must happen before `import config`, which reads GEMINI_API_KEY at import time
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import build_index  # noqa: E402
@@ -169,6 +175,76 @@ def _print_semantic_search_results(query, results):
         )
 
 
+def call_gemini(contents, tools=None, tool_config=None, system_instruction=None, max_retries=5):
+    """POST to the Gemini generateContent endpoint, retrying with backoff on
+    429 (rate limit) and 5xx responses. Raises clearly rather than hanging
+    once retries are exhausted."""
+    if not config.GEMINI_API_KEY:
+        raise RuntimeError(
+            "GEMINI_API_KEY not set. Add it to .env -- see .env.example."
+        )
+
+    url = f"{config.GEMINI_API_BASE}/models/{config.GEMINI_MODEL_NAME}:generateContent"
+    headers = {
+        "Content-Type": "application/json",
+        "x-goog-api-key": config.GEMINI_API_KEY,
+    }
+    body = {"contents": contents}
+    if system_instruction:
+        body["systemInstruction"] = {"parts": [{"text": system_instruction}]}
+    if tools:
+        body["tools"] = tools
+    if tool_config:
+        body["toolConfig"] = tool_config
+
+    backoff = 2
+    last_error = None
+    for attempt in range(1, max_retries + 1):
+        resp = requests.post(url, headers=headers, json=body, timeout=60)
+
+        if resp.status_code == 200:
+            return resp.json()
+
+        if resp.status_code == 429:
+            retry_after = resp.headers.get("Retry-After")
+            wait = int(retry_after) if retry_after else backoff
+            print(
+                f"  Gemini rate limited (429). Retrying in {wait}s... "
+                f"(attempt {attempt}/{max_retries})"
+            )
+            time.sleep(wait)
+            backoff = min(backoff * 2, 60)
+            last_error = f"429: {resp.text[:300]}"
+            continue
+
+        if resp.status_code >= 500:
+            print(
+                f"  Gemini server error {resp.status_code}. Retrying in {backoff}s... "
+                f"(attempt {attempt}/{max_retries})"
+            )
+            time.sleep(backoff)
+            backoff = min(backoff * 2, 60)
+            last_error = f"{resp.status_code}: {resp.text[:300]}"
+            continue
+
+        # Non-retryable (400 bad request, 401/403 auth, 404 unknown model, ...)
+        raise RuntimeError(f"Gemini API error {resp.status_code}: {resp.text[:500]}")
+
+    raise RuntimeError(
+        f"Gemini API: exceeded {max_retries} retries due to rate limiting/server "
+        f"errors. Last error: {last_error}"
+    )
+
+
+def generate_text(prompt, system_instruction=None):
+    """Simple single-turn helper (no tools) -- mainly for standalone testing
+    of the Gemini client itself."""
+    contents = [{"role": "user", "parts": [{"text": prompt}]}]
+    data = call_gemini(contents, system_instruction=system_instruction)
+    parts = data["candidates"][0]["content"]["parts"]
+    return "".join(p.get("text", "") for p in parts if "text" in p)
+
+
 if __name__ == "__main__":
     collection = build_index.get_chroma_collection()
     if collection.count() == 0:
@@ -195,3 +271,7 @@ if __name__ == "__main__":
 
     r = read_file("src/does_not_exist.py")
     _print_read_file_result("src/does_not_exist.py", r)
+
+    print("\ncalling Gemini ({})...".format(config.GEMINI_MODEL_NAME))
+    text = generate_text("Reply with exactly the two words: hello world")
+    print(f"  response: {text!r}")
