@@ -18,6 +18,7 @@ import argparse
 import json
 import sys
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -26,6 +27,7 @@ import build_index  # noqa: E402
 import config  # noqa: E402
 
 RESULTS_PATH = Path(config.PROJECT_ROOT) / "results" / "eval_results.jsonl"
+REPORT_PATH = Path(config.PROJECT_ROOT) / "results" / "eval_report.md"
 
 
 def load_all_examples(path=None):
@@ -224,6 +226,142 @@ def summarize(results):
     }
 
 
+def _md_escape(s):
+    """Keep a string from breaking a markdown table row."""
+    return str(s).replace("|", "\\|").replace("\n", " ").strip()
+
+
+def _file_list_md(files, hits=None):
+    hits = hits or set()
+    if not files:
+        return "*(none)*"
+    return "<br>".join(
+        (f"**{_md_escape(f)}** ✓" if f in hits else _md_escape(f)) for f in files
+    )
+
+
+CATEGORY_LABELS = {
+    "complete_miss": "Complete miss",
+    "partial_hit": "Partial hit",
+    "full_hit": "Full hit",
+}
+CATEGORY_DEFINITIONS = {
+    "complete_miss": "None of the ground-truth changed files appeared anywhere in the predictions.",
+    "partial_hit": "The issue has multiple ground-truth files and only some were predicted.",
+    "full_hit": "Every ground-truth file was predicted (precision may still be <1 if extra wrong files were also predicted).",
+}
+
+
+def write_report(results, summary, path=None):
+    path = path or REPORT_PATH
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    scored = [r for r in results if r["run_error"] is None]
+    failed = [r for r in results if r["run_error"] is not None]
+    generated_at = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+
+    lines = []
+    lines.append("# Issue Localizer -- Evaluation Report")
+    lines.append("")
+    lines.append(f"**Generated:** {generated_at}  ")
+    lines.append(f"**Model:** `{config.GEMINI_MODEL_NAME}`  ")
+    lines.append(f"**Repo under test:** [{config.REPO_OWNER}/{config.REPO_NAME}](https://github.com/{config.REPO_OWNER}/{config.REPO_NAME})  ")
+    lines.append(
+        f"**Dataset:** `data/eval_dataset.jsonl` -- {len(results)} examples "
+        f"({summary['n_scored']} scored, {summary['n_failed']} failed to run due to API errors)"
+    )
+    lines.append("")
+
+    if summary["n_scored"] == 0:
+        lines.append("No examples were successfully scored.")
+        path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        return
+
+    full_hit_rate = summary["category_breakdown"]["full_hit"]["n"] / summary["n_scored"]
+
+    lines.append("## Headline numbers")
+    lines.append("")
+    lines.append("| Metric | Value |")
+    lines.append("|---|---|")
+    lines.append(f"| Precision (macro-avg) | {summary['precision']:.3f} |")
+    lines.append(f"| Recall (macro-avg) | {summary['recall']:.3f} |")
+    lines.append(f"| F1 (macro-avg) | {summary['f1']:.3f} |")
+    lines.append(f"| Avg. tool-call turns per example | {summary['avg_turns']:.1f} (cap: {config.AGENT_MAX_TOOL_CALLS}) |")
+    lines.append(f"| Full-hit rate | {full_hit_rate:.1%} ({summary['category_breakdown']['full_hit']['n']}/{summary['n_scored']}) |")
+    lines.append("")
+
+    lines.append("## Results by category")
+    lines.append("")
+    lines.append("| Category | Count | % of scored | Precision | Recall | F1 | Avg turns |")
+    lines.append("|---|---|---|---|---|---|---|")
+    for cat in CATEGORIES:
+        b = summary["category_breakdown"][cat]
+        if b["n"] == 0:
+            lines.append(f"| {CATEGORY_LABELS[cat]} | 0 | 0.0% | -- | -- | -- | -- |")
+            continue
+        pct = b["n"] / summary["n_scored"]
+        lines.append(
+            f"| {CATEGORY_LABELS[cat]} | {b['n']} | {pct:.1%} | {b['precision']:.2f} | "
+            f"{b['recall']:.2f} | {b['f1']:.2f} | {b['avg_turns']:.1f} |"
+        )
+    lines.append("")
+    for cat in CATEGORIES:
+        lines.append(f"- **{CATEGORY_LABELS[cat]}**: {CATEGORY_DEFINITIONS[cat]}")
+    lines.append("")
+
+    lines.append("## Observed patterns")
+    lines.append("")
+    if summary["patterns"]:
+        for p in summary["patterns"]:
+            lines.append(f"- {p}")
+    else:
+        lines.append("*(not enough examples in each category to compare)*")
+    lines.append("")
+
+    lines.append("## Failure analysis")
+    lines.append("")
+    for cat in ("complete_miss", "partial_hit"):
+        rows = [r for r in scored if r["category"] == cat]
+        lines.append(f"### {CATEGORY_LABELS[cat]} ({len(rows)})")
+        lines.append("")
+        if not rows:
+            lines.append("*(none)*")
+            lines.append("")
+            continue
+        lines.append("| Issue | Predicted | Actual (✓ = predicted) | Turns |")
+        lines.append("|---|---|---|---|")
+        for r in rows:
+            hits = set(r["predicted_files"])
+            lines.append(
+                f"| {_md_escape(r['issue_title'])} | {_file_list_md(r['predicted_files'])} | "
+                f"{_file_list_md(r['actual_files'], hits)} | {r['turns']} |"
+            )
+        lines.append("")
+
+    if failed:
+        lines.append(f"### Failed to run ({len(failed)})")
+        lines.append("")
+        lines.append("| Issue | Error |")
+        lines.append("|---|---|")
+        for r in failed:
+            lines.append(f"| {_md_escape(r['issue_title'])} | {_md_escape(r['run_error'][:200])} |")
+        lines.append("")
+
+    lines.append("## All scored examples")
+    lines.append("")
+    lines.append("| # | Issue | Category | Precision | Recall | F1 | Turns |")
+    lines.append("|---|---|---|---|---|---|---|")
+    for r in sorted(scored, key=lambda r: r["index"]):
+        lines.append(
+            f"| {r['index']} | {_md_escape(r['issue_title'])} | {CATEGORY_LABELS[r['category']]} | "
+            f"{r['precision']:.2f} | {r['recall']:.2f} | {r['f1']:.2f} | {r['turns']} |"
+        )
+    lines.append("")
+
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    print(f"\nWrote {path}")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--limit", type=int, default=None, help="Only run the first N examples.")
@@ -231,10 +369,26 @@ def main():
     parser.add_argument("--resume", action="store_true", help="Skip examples already present in the results file.")
     parser.add_argument("--output", type=str, default=None, help="Results JSONL path (default: results/eval_results.jsonl).")
     parser.add_argument("--max-tool-calls", type=int, default=None)
+    parser.add_argument("--report", type=str, default=None, help="Report .md path (default: results/eval_report.md).")
+    parser.add_argument(
+        "--report-only",
+        action="store_true",
+        help="Skip running the agent entirely; just regenerate the report from an existing results file.",
+    )
     args = parser.parse_args()
 
     results_path = Path(args.output) if args.output else RESULTS_PATH
     results_path.parent.mkdir(parents=True, exist_ok=True)
+
+    if args.report_only:
+        if not results_path.exists():
+            print(f"No results file at {results_path} -- run without --report-only first.")
+            sys.exit(1)
+        with open(results_path, encoding="utf-8") as f:
+            results = [json.loads(line) for line in f]
+        summary = summarize(results)
+        write_report(results, summary, path=Path(args.report) if args.report else None)
+        return
 
     all_examples = load_all_examples()
     indexed = list(enumerate(all_examples))
@@ -313,6 +467,8 @@ def main():
             print("\nObserved patterns:")
             for p in summary["patterns"]:
                 print(f"  - {p}")
+
+    write_report(results, summary, path=Path(args.report) if args.report else None)
 
 
 if __name__ == "__main__":
