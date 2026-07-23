@@ -71,5 +71,7 @@ AGENT_SEMANTIC_SEARCH_TOP_K = 8
 AGENT_GREP_MAX_RESULTS = 20
 # How many lines read_file will return before truncating.
 AGENT_READ_FILE_MAX_LINES = 400
-# Safety cap on tool-call turns in the agent loop before we give up.
-AGENT_MAX_TOOL_CALLS = 8
+# Safety cap on tool-call turns in the agent loop before we give up. The
+# system prompt tells the model this exact budget so it paces itself
+# instead of over-exploring and never submitting.
+AGENT_MAX_TOOL_CALLS = 10

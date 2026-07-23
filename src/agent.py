@@ -245,6 +245,249 @@ def generate_text(prompt, system_instruction=None):
     return "".join(p.get("text", "") for p in parts if "text" in p)
 
 
+SEMANTIC_SEARCH_DECL = {
+    "name": "semantic_search",
+    "description": (
+        "Semantically search the repo's indexed Python source for code related "
+        "to a natural-language description. Good for finding relevant "
+        "functions/classes/methods by meaning. Does NOT cover non-Python files "
+        "(e.g. C sources) -- use grep_repo for those."
+    ),
+    "parameters": {
+        "type": "OBJECT",
+        "properties": {
+            "query": {
+                "type": "STRING",
+                "description": "Natural-language description of the code you're looking for.",
+            },
+            "top_k": {
+                "type": "INTEGER",
+                "description": "Number of results to return (default 8).",
+            },
+        },
+        "required": ["query"],
+    },
+}
+
+GREP_REPO_DECL = {
+    "name": "grep_repo",
+    "description": (
+        "Exact (or regex) text search across the ENTIRE cloned repo, including "
+        "non-Python files like C sources. Use this to find exact function/symbol/"
+        "error-message names mentioned in the issue text -- semantic_search only "
+        "covers Python source."
+    ),
+    "parameters": {
+        "type": "OBJECT",
+        "properties": {
+            "pattern": {
+                "type": "STRING",
+                "description": "Literal text (or regex if regex=true) to search for.",
+            },
+            "regex": {
+                "type": "BOOLEAN",
+                "description": "Treat pattern as a regex instead of a literal string. Default false.",
+            },
+        },
+        "required": ["pattern"],
+    },
+}
+
+READ_FILE_DECL = {
+    "name": "read_file",
+    "description": (
+        "Read a file (optionally a specific line range) from the cloned repo. "
+        "Use this when a search hit looks relevant but you need more "
+        "surrounding context before deciding."
+    ),
+    "parameters": {
+        "type": "OBJECT",
+        "properties": {
+            "path": {
+                "type": "STRING",
+                "description": "Repo-relative file path, e.g. 'src/PIL/Image.py'.",
+            },
+            "start_line": {"type": "INTEGER", "description": "1-indexed start line (optional)."},
+            "end_line": {"type": "INTEGER", "description": "1-indexed end line, inclusive (optional)."},
+        },
+        "required": ["path"],
+    },
+}
+
+SUBMIT_PREDICTIONS_DECL = {
+    "name": "submit_predictions",
+    "description": (
+        "Submit your FINAL ranked list of predicted files that most likely need "
+        "to change to fix the issue. Call this exactly once, when you're done "
+        "investigating -- not before you've used at least one search tool."
+    ),
+    "parameters": {
+        "type": "OBJECT",
+        "properties": {
+            "predictions": {
+                "type": "ARRAY",
+                "description": "Ranked list of predicted files, most likely first (at most 5).",
+                "items": {
+                    "type": "OBJECT",
+                    "properties": {
+                        "file": {"type": "STRING", "description": "Repo-relative file path."},
+                        "reasoning": {
+                            "type": "STRING",
+                            "description": "One or two sentence justification grounded in tool results.",
+                        },
+                    },
+                    "required": ["file", "reasoning"],
+                },
+            },
+        },
+        "required": ["predictions"],
+    },
+}
+
+AGENT_TOOLS = [
+    {
+        "functionDeclarations": [
+            SEMANTIC_SEARCH_DECL,
+            GREP_REPO_DECL,
+            READ_FILE_DECL,
+            SUBMIT_PREDICTIONS_DECL,
+        ]
+    }
+]
+
+def _build_system_instruction(max_tool_calls):
+    return f"""You are a code-search agent for the {config.REPO_OWNER}/{config.REPO_NAME} \
+GitHub repo. Given a GitHub issue's title and body, find which files in the \
+repo most likely need to change to fix it.
+
+You have three investigation tools:
+- semantic_search: find Python code related to the issue by meaning
+- grep_repo: find exact symbol/function/error-message text anywhere in the \
+repo, including non-Python (e.g. C) files that semantic_search can't reach
+- read_file: read more surrounding context around a promising hit
+
+Start with semantic_search. If the issue text names specific functions, \
+classes, error messages, or identifiers, also use grep_repo -- it's often \
+the only way to find hits in non-Python source. Use read_file when a hit \
+looks relevant but you need to see more of it before deciding.
+
+You have a HARD BUDGET of {max_tool_calls} tool calls total, across all \
+tools -- plan around it. A typical good investigation uses only 3-5: e.g. \
+one semantic_search, one grep_repo for a key identifier, maybe one \
+read_file for confirmation. Don't spend calls re-confirming something \
+you're already confident about.
+
+As soon as you have enough evidence, call submit_predictions EXACTLY ONCE \
+with a ranked list (most likely first, at most 5 files) of repo-relative \
+file paths, each with a short reasoning grounded in what your tools \
+actually showed you. Don't guess at files you have no evidence for, and \
+don't wait until you've exhausted your budget to submit."""
+
+
+def _execute_tool_call(name, args, collection, model):
+    if name == "semantic_search":
+        return semantic_search(
+            args["query"], top_k=args.get("top_k"), collection=collection, model=model
+        )
+    if name == "grep_repo":
+        return grep_repo(args["pattern"], regex=args.get("regex", False))
+    if name == "read_file":
+        return read_file(
+            args["path"], start_line=args.get("start_line"), end_line=args.get("end_line")
+        )
+    return {"error": f"Unknown tool: {name}"}
+
+
+def localize_issue(issue_title, issue_body, collection=None, model=None, max_tool_calls=None, verbose=True):
+    """Run the full agent loop for one issue. Returns a dict:
+    {predictions: [{file, reasoning}, ...], trace: [...], turns: int}
+    (predictions is [] and an "error" key is set if the model never called
+    submit_predictions within max_tool_calls turns)."""
+    max_tool_calls = max_tool_calls or config.AGENT_MAX_TOOL_CALLS
+    collection = collection or build_index.get_chroma_collection()
+    model = model or build_index.load_embedding_model()
+
+    user_prompt = f"Issue title: {issue_title}\n\nIssue body:\n{issue_body}"
+    contents = [{"role": "user", "parts": [{"text": user_prompt}]}]
+    system_instruction = _build_system_instruction(max_tool_calls)
+    trace = []
+
+    for turn in range(max_tool_calls):
+        # On the last available turn, force a submission instead of letting
+        # the model keep investigating and blowing the budget with nothing
+        # to show for it.
+        tool_config = None
+        if turn == max_tool_calls - 1:
+            tool_config = {
+                "functionCallingConfig": {"mode": "ANY", "allowedFunctionNames": ["submit_predictions"]}
+            }
+
+        data = call_gemini(
+            contents,
+            tools=AGENT_TOOLS,
+            tool_config=tool_config,
+            system_instruction=system_instruction,
+        )
+
+        if "candidates" not in data or not data["candidates"]:
+            feedback = data.get("promptFeedback", {})
+            raise RuntimeError(f"Gemini returned no candidates: {feedback}")
+
+        parts = data["candidates"][0]["content"]["parts"]
+        contents.append({"role": "model", "parts": parts})
+
+        function_calls = [p["functionCall"] for p in parts if "functionCall" in p]
+
+        if not function_calls:
+            text = "".join(p.get("text", "") for p in parts)
+            if verbose:
+                print(f"  [turn {turn}] model replied with text, no tool call: {text[:200]!r}")
+            trace.append({"turn": turn, "type": "text_no_call", "text": text})
+            contents.append(
+                {
+                    "role": "user",
+                    "parts": [{"text": "Please call submit_predictions now with your ranked file list."}],
+                }
+            )
+            continue
+
+        response_parts = []
+        submitted = None
+        for fc in function_calls:
+            name, args = fc["name"], fc.get("args", {})
+            if verbose:
+                print(f"  [turn {turn}] tool call: {name}({args})")
+
+            if name == "submit_predictions":
+                submitted = args.get("predictions", [])
+                response_parts.append(
+                    {"functionResponse": {"name": name, "response": {"status": "received"}}}
+                )
+                continue
+
+            try:
+                result = _execute_tool_call(name, args, collection, model)
+            except Exception as e:
+                result = {"error": str(e)}
+
+            trace.append({"turn": turn, "type": "tool_call", "name": name, "args": args, "result": result})
+            response_parts.append({"functionResponse": {"name": name, "response": {"result": result}}})
+
+        # The API rejects a "function" role for functionResponse parts (only
+        # USER/MODEL etc. are accepted) -- "user" is the correct role here.
+        contents.append({"role": "user", "parts": response_parts})
+
+        if submitted is not None:
+            return {"predictions": submitted, "trace": trace, "turns": turn + 1}
+
+    return {
+        "predictions": [],
+        "trace": trace,
+        "turns": max_tool_calls,
+        "error": f"Exceeded max_tool_calls ({max_tool_calls}) without submit_predictions.",
+    }
+
+
 if __name__ == "__main__":
     collection = build_index.get_chroma_collection()
     if collection.count() == 0:
@@ -275,3 +518,21 @@ if __name__ == "__main__":
     print("\ncalling Gemini ({})...".format(config.GEMINI_MODEL_NAME))
     text = generate_text("Reply with exactly the two words: hello world")
     print(f"  response: {text!r}")
+
+    print("\nrunning full agent loop on a sample issue...")
+    result = localize_issue(
+        issue_title="path_subscript hardcodes slice length to 4 instead of self->count",
+        issue_body=(
+            "In src/path.c, the path_subscript function hardcodes len = 4 when "
+            "computing slice indices, instead of using self->count (the actual "
+            "path length). For paths with more than 4 points, negative indices "
+            "and slices beyond index 4 resolve incorrectly."
+        ),
+        collection=collection,
+        model=model,
+    )
+    print(f"\nturns used: {result['turns']}")
+    if result.get("error"):
+        print(f"ERROR: {result['error']}")
+    for rank, p in enumerate(result["predictions"], start=1):
+        print(f"  {rank}. {p['file']} -- {p['reasoning']}")
