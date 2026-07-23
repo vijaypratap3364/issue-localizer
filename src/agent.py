@@ -320,7 +320,13 @@ SUBMIT_PREDICTIONS_DECL = {
                         "file": {"type": "STRING", "description": "Repo-relative file path."},
                         "reasoning": {
                             "type": "STRING",
-                            "description": "One or two sentence justification grounded in tool results.",
+                            "description": (
+                                "EXACTLY ONE decisive sentence justifying this file, stating "
+                                "your conclusion directly. Grounded in tool results, e.g. name "
+                                "the specific function/symbol you found. Not your thought "
+                                "process: no hedging, no 'let me check', no 'or wait', no "
+                                "narrating what you're about to do -- state the conclusion only."
+                            ),
                         },
                     },
                     "required": ["file", "reasoning"],
@@ -366,9 +372,14 @@ you're already confident about.
 
 As soon as you have enough evidence, call submit_predictions EXACTLY ONCE \
 with a ranked list (most likely first, at most 5 files) of repo-relative \
-file paths, each with a short reasoning grounded in what your tools \
-actually showed you. Don't guess at files you have no evidence for, and \
-don't wait until you've exhausted your budget to submit."""
+file paths. Don't guess at files you have no evidence for, and don't wait \
+until you've exhausted your budget to submit.
+
+Each file's reasoning must be exactly one decisive sentence stating your \
+conclusion, grounded in what your tools actually showed you (e.g. name the \
+specific function/symbol). Never write out your thinking -- no "let me \
+check", no "or wait", no narrating what you're about to look at. Reach the \
+conclusion first, then write only that."""
 
 
 def _execute_tool_call(name, args, collection, model):
