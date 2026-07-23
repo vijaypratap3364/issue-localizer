@@ -83,6 +83,7 @@ def run_example(example, index, collection, model, max_tool_calls=None):
         return {
             "index": index,
             "issue_title": example["issue_title"],
+            "issue_body": example["issue_body"],
             "actual_files": example["changed_files"],
             "predicted_files": [],
             "turns": None,
@@ -92,19 +93,112 @@ def run_example(example, index, collection, model, max_tool_calls=None):
 
     predicted_files = _dedupe_top5(result["predictions"])
     metrics = compute_metrics(predicted_files, example["changed_files"])
+    category = categorize(predicted_files, example["changed_files"])
 
     return {
         "index": index,
         "issue_title": example["issue_title"],
+        "issue_body": example["issue_body"],
         "actual_files": example["changed_files"],
         "predicted_files": predicted_files,
         "reasoning": {p["file"]: p["reasoning"] for p in result["predictions"][:5]},
         "turns": result["turns"],
+        "category": category,
         "agent_error": result.get("error"),
         "run_error": None,
         "wall_seconds": round(time.time() - t0, 1),
         **metrics,
     }
+
+
+def categorize(predicted_files, actual_files):
+    """Partition every scored example into exactly one bucket:
+      - complete_miss: none of the actual files were predicted (recall = 0)
+      - partial_hit:   actual has >1 file and only some were predicted
+      - full_hit:      every actual file was predicted (recall = 1)
+    """
+    predicted_set = set(predicted_files)
+    actual_set = set(actual_files)
+    tp = len(predicted_set & actual_set)
+
+    if tp == 0:
+        return "complete_miss"
+    if tp < len(actual_set):
+        return "partial_hit"
+    return "full_hit"
+
+
+CATEGORIES = ("complete_miss", "partial_hit", "full_hit")
+
+
+def category_breakdown(scored):
+    """Per-category example count and macro-averaged precision/recall/F1/turns."""
+    breakdown = {}
+    for cat in CATEGORIES:
+        rows = [r for r in scored if r["category"] == cat]
+        n = len(rows)
+        if n == 0:
+            breakdown[cat] = {"n": 0}
+            continue
+        breakdown[cat] = {
+            "n": n,
+            "precision": sum(r["precision"] for r in rows) / n,
+            "recall": sum(r["recall"] for r in rows) / n,
+            "f1": sum(r["f1"] for r in rows) / n,
+            "avg_turns": sum(r["turns"] for r in rows) / n,
+            "avg_body_len": sum(len(r["issue_body"]) for r in rows) / n,
+            "avg_actual_files": sum(len(r["actual_files"]) for r in rows) / n,
+        }
+    return breakdown
+
+
+def detect_patterns(scored):
+    """Compute a few data-driven signals comparing complete_miss/partial_hit
+    against full_hit, to surface in the report's "observed patterns"
+    section rather than relying on unverified hand-wavy commentary."""
+    breakdown = category_breakdown(scored)
+    patterns = []
+
+    miss = breakdown.get("complete_miss", {})
+    hit = breakdown.get("full_hit", {})
+
+    if miss.get("n") and hit.get("n"):
+        if miss["avg_body_len"] < 0.7 * hit["avg_body_len"]:
+            patterns.append(
+                f"Complete misses have noticeably shorter issue bodies on average "
+                f"({miss['avg_body_len']:.0f} chars vs {hit['avg_body_len']:.0f} for full hits) "
+                f"-- vague/short issue text may be harder to localize from."
+            )
+        if miss["avg_actual_files"] > 1.3 * hit["avg_actual_files"]:
+            patterns.append(
+                f"Complete misses involve more ground-truth files on average "
+                f"({miss['avg_actual_files']:.1f} vs {hit['avg_actual_files']:.1f} for full hits) "
+                f"-- cross-file changes are harder to fully localize."
+            )
+        if miss["avg_turns"] > hit["avg_turns"]:
+            patterns.append(
+                f"Complete misses use more tool-call turns on average "
+                f"({miss['avg_turns']:.1f} vs {hit['avg_turns']:.1f} for full hits) -- "
+                f"more investigation doesn't correlate with a correct answer here; "
+                f"the agent isn't running out of budget, it's running out of leads."
+            )
+        else:
+            patterns.append(
+                f"Complete misses use FEWER tool-call turns on average "
+                f"({miss['avg_turns']:.1f} vs {hit['avg_turns']:.1f} for full hits) -- "
+                f"the agent may be giving up/submitting too early on these rather than "
+                f"investigating further."
+            )
+
+    partial = breakdown.get("partial_hit", {})
+    if partial.get("n") and hit.get("n") and partial["avg_actual_files"] > hit["avg_actual_files"]:
+        patterns.append(
+            f"Partial hits involve more ground-truth files on average "
+            f"({partial['avg_actual_files']:.1f} vs {hit['avg_actual_files']:.1f} for full hits) "
+            f"-- as expected, finding *some but not all* changed files is a multi-file-change problem."
+        )
+
+    return patterns
 
 
 def summarize(results):
@@ -125,6 +219,8 @@ def summarize(results):
         "recall": sum(r["recall"] for r in scored) / n,
         "f1": sum(r["f1"] for r in scored) / n,
         "avg_turns": sum(r["turns"] for r in scored) / n,
+        "category_breakdown": category_breakdown(scored),
+        "patterns": detect_patterns(scored),
     }
 
 
@@ -203,6 +299,20 @@ def main():
             f"Precision: {summary['precision']:.3f}  Recall: {summary['recall']:.3f}  "
             f"F1: {summary['f1']:.3f}  Avg turns: {summary['avg_turns']:.1f}"
         )
+        print("\nBy category:")
+        for cat in CATEGORIES:
+            b = summary["category_breakdown"][cat]
+            if b["n"] == 0:
+                print(f"  {cat}: 0 examples")
+                continue
+            print(
+                f"  {cat}: n={b['n']}  precision={b['precision']:.2f}  "
+                f"recall={b['recall']:.2f}  f1={b['f1']:.2f}  avg_turns={b['avg_turns']:.1f}"
+            )
+        if summary["patterns"]:
+            print("\nObserved patterns:")
+            for p in summary["patterns"]:
+                print(f"  - {p}")
 
 
 if __name__ == "__main__":
