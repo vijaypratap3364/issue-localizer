@@ -97,6 +97,62 @@ def grep_repo(pattern, max_results=None, regex=False):
     return results
 
 
+def read_file(path, start_line=None, end_line=None, max_lines=None):
+    """Read a file (or a line range of one) from the cloned repo. Use this
+    when a semantic_search/grep_repo hit looks promising but you need more
+    surrounding context than a single chunk gives you.
+
+    `path` must be a repo-relative path (e.g. "src/PIL/Image.py"); paths
+    that resolve outside the repo cache (via ".." or an absolute path) are
+    rejected -- this tool only ever reads files from the cloned repo.
+    """
+    max_lines = max_lines or config.AGENT_READ_FILE_MAX_LINES
+    repo_dir = Path(config.REPO_CACHE_DIR).resolve()
+    if not (repo_dir / ".git").exists():
+        raise RuntimeError(
+            f"No repo cloned at {repo_dir} -- run `python src/build_index.py` first."
+        )
+
+    target = (repo_dir / path).resolve()
+    try:
+        target.relative_to(repo_dir)
+    except ValueError:
+        return {"file": path, "error": f"Path {path!r} is outside the repo; refusing to read it."}
+
+    if not target.is_file():
+        return {"file": path, "error": f"File not found: {path}"}
+
+    lines = target.read_text(encoding="utf-8", errors="ignore").splitlines()
+    total_lines = len(lines)
+    start = max(1, start_line or 1)
+    end = min(end_line or total_lines, total_lines)
+    truncated = False
+    if end - start + 1 > max_lines:
+        end = start + max_lines - 1
+        truncated = True
+
+    return {
+        "file": path,
+        "start_line": start,
+        "end_line": end,
+        "total_lines": total_lines,
+        "truncated": truncated,
+        "content": "\n".join(lines[start - 1 : end]),
+    }
+
+
+def _print_read_file_result(path, result, **kwargs):
+    print(f"\nread_file({path!r}, {kwargs}) ->")
+    if "error" in result:
+        print(f"  ERROR: {result['error']}")
+        return
+    print(
+        f"  lines {result['start_line']}-{result['end_line']} of "
+        f"{result['total_lines']} (truncated={result['truncated']})"
+    )
+    print("  " + result["content"].splitlines()[0][:100])
+
+
 def _print_grep_results(pattern, results):
     print(f"\ngrep_repo({pattern!r}) -> {len(results)} results")
     for r in results:
@@ -130,3 +186,12 @@ if __name__ == "__main__":
     for pattern in ["PyDict_GetItemRef", "path_subscript", "DoesNotExistXYZ123"]:
         results = grep_repo(pattern)
         _print_grep_results(pattern, results)
+
+    r = read_file("src/path.c", start_line=590, end_line=610)
+    _print_read_file_result("src/path.c", r, start_line=590, end_line=610)
+
+    r = read_file("../../../../etc/passwd")
+    _print_read_file_result("../../../../etc/passwd", r)
+
+    r = read_file("src/does_not_exist.py")
+    _print_read_file_result("src/does_not_exist.py", r)
