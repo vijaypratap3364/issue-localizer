@@ -54,3 +54,21 @@ EMBEDDING_MODEL_NAME = "all-MiniLM-L6-v2"
 # On-disk Chroma index (persisted so it isn't rebuilt on every run).
 CHROMA_PERSIST_DIR = os.path.join(PROJECT_ROOT, ".cache", "chroma")
 CHROMA_COLLECTION_NAME = f"{REPO_NAME.lower()}_code_chunks"
+
+# --- Agent (Phase 3: agent.py) ---
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
+GEMINI_API_BASE = "https://generativelanguage.googleapis.com/v1beta"
+# Flash, not Pro: much higher free-tier rate limits, and this task doesn't
+# need frontier-level reasoning. Verified against the live ListModels
+# endpoint for the configured GEMINI_API_KEY -- see agent.py's
+# `list_gemini_models` helper if this ever needs re-checking.
+GEMINI_MODEL_NAME = "gemini-2.5-flash"
+
+# How many chunks semantic_search returns by default.
+AGENT_SEMANTIC_SEARCH_TOP_K = 8
+# How many matching lines grep_repo returns by default.
+AGENT_GREP_MAX_RESULTS = 20
+# How many lines read_file will return before truncating.
+AGENT_READ_FILE_MAX_LINES = 400
+# Safety cap on tool-call turns in the agent loop before we give up.
+AGENT_MAX_TOOL_CALLS = 8
