@@ -87,5 +87,8 @@ AGENT_GREP_MAX_RESULTS = 20
 AGENT_READ_FILE_MAX_LINES = 400
 # Safety cap on tool-call turns in the agent loop before we give up. The
 # system prompt tells the model this exact budget so it paces itself
-# instead of over-exploring and never submitting.
-AGENT_MAX_TOOL_CALLS = 10
+# instead of over-exploring and never submitting. Lowered from 10 to 6
+# after manual testing showed the model would sometimes keep chasing
+# plausible-but-wrong secondary files well past the point of having enough
+# evidence to submit.
+AGENT_MAX_TOOL_CALLS = 6
