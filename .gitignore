@@ -15,3 +15,4 @@ venv/
 
 # Build caches (Phase 2: build_index.py) -- regenerable, not source we own
 .cache/
+PROJECT_DEEP_DIVE.md
