@@ -79,8 +79,13 @@ GEMINI_API_BASE = "https://generativelanguage.googleapis.com/v1beta"
 # and note quota details only surface in an actual 429 response body).
 GEMINI_MODEL_NAME = "gemini-3.5-flash-lite"
 
-# How many chunks semantic_search returns by default.
-AGENT_SEMANTIC_SEARCH_TOP_K = 8
+# How many chunks semantic_search returns by default. Raised from 8 to 20:
+# eval showed strong precision (0.76) but weak recall (0.45) -- the agent
+# tends to find one correct file and stop rather than guessing wrong ones,
+# so under-coverage on multi-file issues (a plugin file + its test file +
+# a C source file) was the bigger problem. More candidate chunks per query
+# gives it more surface area to spot those siblings.
+AGENT_SEMANTIC_SEARCH_TOP_K = 20
 # How many matching lines grep_repo returns by default.
 AGENT_GREP_MAX_RESULTS = 20
 # How many lines read_file will return before truncating.
