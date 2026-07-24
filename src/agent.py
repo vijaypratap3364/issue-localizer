@@ -370,6 +370,16 @@ one semantic_search, one grep_repo for a key identifier, maybe one \
 read_file for confirmation. Don't spend calls re-confirming something \
 you're already confident about.
 
+Before calling submit_predictions, explicitly check for breadth: are there \
+other files likely affected by this same change? A fix to a plugin's \
+Python file often also touches its test file (e.g. Tests/test_file_foo.py) \
+and/or the C-level implementation backing it (e.g. src/libImaging/Foo.c or \
+src/_imaging.c) if the bug is in decoding/encoding logic. Don't stop at the \
+first plausible file if the issue suggests a broader, multi-file change --  \
+if you have leftover budget, spend one grep_repo/semantic_search call \
+checking for an obvious sibling before finalizing. But don't guess: only \
+add a file if you actually found evidence for it.
+
 As soon as you have enough evidence, call submit_predictions EXACTLY ONCE \
 with a ranked list (most likely first, at most 5 files) of repo-relative \
 file paths. Don't guess at files you have no evidence for, and don't wait \
